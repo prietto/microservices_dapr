@@ -1,0 +1,10 @@
+{
+	"folders": [
+		{
+			"path": "billing_service"
+		},
+		{
+			"path": "inventory_service"
+		}
+	]
+}
