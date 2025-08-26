@@ -5,11 +5,11 @@ from .inventory_item import (
     InventoryItemResponse,
     InventoryStatusResponse
 )
-from .category import (
-    CategoryBase,
-    CategoryCreate,
-    CategoryResponse
-)
+# from .category import (
+#     CategoryBase,
+#     CategoryCreate,
+#     CategoryResponse
+# )
 
 __all__ = [
     "InventoryItemBase",
