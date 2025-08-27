@@ -1,0 +1,49 @@
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: microservices-access-control
+spec:
+  accessControl:
+    defaultAction: allow
+    trustDomain: "microservices-platform"
+    policies:
+    
+    # BILLING SERVICE - puede hacer cualquier llamada
+    - appId: billing-service
+      defaultAction: allow
+      trustDomain: "microservices-platform"
+      namespace: "default"
+    
+    # INVENTORY SERVICE - solo acepta llamadas de billing-service
+    - appId: inventory-service
+      defaultAction: deny
+      trustDomain: "microservices-platform"
+      namespace: "default"
+      operations:
+      - name: "*"
+        httpVerb: ["GET", "POST", "PUT", "PATCH", "DELETE"]
+        action: allow
+        appIds: ['billing-service']
+    
+    # PAYMENT SERVICE - solo acepta llamadas de billing-service
+    - appId: payment-service
+      defaultAction: deny
+      trustDomain: "microservices-platform"
+      namespace: "default"
+      operations:
+      - name: "*"
+        httpVerb: ["GET", "POST", "PUT", "DELETE"]
+        action: allow
+        appIds: ['billing-service']
+  
+
+  # API Token para proteger endpoints de Dapr
+  api:
+    token: "dapr-microservices-poc-token-2025"  # ← Token personalizado
+  
+
+  # Logging mejorado para auditoría
+  metric:
+    enabled: true
+  tracing:
+    samplingRate: "1"
