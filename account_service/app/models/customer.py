@@ -1,9 +1,9 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
 from pydantic import BaseModel, EmailStr
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict
 from enum import Enum
 
 Base = declarative_base()
@@ -27,16 +27,17 @@ class Customer(Base):
     city = Column(String(100), nullable=True)
     country = Column(String(100), nullable=True)
     status = Column(String(20), default=CustomerStatus.ACTIVE)
+    
+    # Control de eliminación distribuida
+    deletion_requested_at = Column(DateTime(timezone=True), nullable=True)
+    deletion_blocked_by = Column(JSON, nullable=True)
+    deletion_responses = Column(JSON, nullable=True)
+    
+    # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    deletion_requested_at = Column(DateTime(timezone=True), nullable=True)
-    deletion_blocked_by = Column(Text, nullable=True)  # JSON de servicios que bloquean
 
-    deletion_timeout_at = Column(DateTime(timezone=True), nullable=True)  # ← NUEVO
-    deletion_responses = Column(Text, nullable=True)  # JSON de respuestas recibidas
-    deletion_completed = Column(Boolean, default=False)  # ← NUEVO
-
-# Pydantic Models
+# Pydantic Models para API
 class CustomerBase(BaseModel):
     email: EmailStr
     first_name: str
@@ -67,11 +68,3 @@ class CustomerResponse(CustomerBase):
 
     class Config:
         from_attributes = True
-
-class DeletionValidationResponse(BaseModel):
-    service: str
-    customer_id: str
-    can_delete: bool
-    blocking_reason: Optional[str] = None
-    blocking_details: Optional[dict] = None
-    checked_at: datetime

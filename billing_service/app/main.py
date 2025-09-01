@@ -7,6 +7,10 @@ from app.services.invoice_service import InvoiceService
 from app.models.invoice import InvoiceStatus
 import httpx
 import asyncio
+from dapr.clients import DaprClient
+from app.migration import run_migration
+from datetime import datetime
+from typing import List
 
 app = FastAPI(title=settings.project_name)
 
@@ -14,6 +18,7 @@ app = FastAPI(title=settings.project_name)
 @app.on_event("startup")
 async def startup_event():
     create_tables()
+    run_migration()
 
 app.include_router(router, prefix=settings.api_v1_str)
 
@@ -53,68 +58,267 @@ def subscribe():
             "pubsubname": "rabbitmq-pubsub",
             "topic": "payment-failed",
             "route": "/payment-failed"
+        },
+        {
+            "pubsubname": "rabbitmq-pubsub",
+            "topic": "customer.deletion.request",
+            "route": "/customer-deletion-request"
+        },
+
+        {
+            "pubsubname": "rabbitmq-pubsub", 
+            "topic": "customer-response",
+            "route": "/customer-response"
         }
     ]
 
 
-# EL SERVICIO DE INVENTARIO RESPONDIO Y SE EJECUTA EL SIGUIENTE METODO
-@app.post("/inventory-response")
-async def handle_inventory_response(event_data: dict, db: Session = Depends(get_db)):
-    print(f"[BILLING] Received inventory response: {event_data}")
-    
-    data = event_data.get("data", event_data)
-    invoice_id = data.get("invoice_id")
-    product_id = data.get("product_id")
-    available = data.get("available")
-    unit_price = data.get("unit_price", 0.0)
-    quantity_requested = data.get("quantity_requested", 1)
-    message = data.get("message", "")
 
-    if not invoice_id:
-        print(f"[BILLING] ERROR: No invoice_id in inventory response")
-        return {"success": False, "error": "No invoice_id"}
-    
-    invoice_service = InvoiceService(db)
-    
+@app.post("/customer-response")
+async def handle_customer_response(event_data: dict, db: Session = Depends(get_db)):
+    """Manejar respuesta de verificación de cliente desde account service"""
     try:
-        if available:
-            # Inventario disponible - cambiar estado y enviar evento de pago
-            invoice = invoice_service.update_invoice_status(
-                invoice_id=invoice_id,
-                status=InvoiceStatus.PAYMENT_PROCESSING,  # ← NUEVO ESTADO
-                unit_price=unit_price,
-                notes=f"Inventory confirmed: {message}. Requesting payment..."
+        print(f"[BILLING] Received customer response: {event_data}")
+        
+        data = event_data.get("data", event_data)
+        invoice_id = data.get("invoice_id")
+        customer_exists = data.get("customer_exists", False)
+        customer_created = data.get("customer_created", False)
+        error_message = data.get("error")
+        
+        if not invoice_id:
+            print(f"[BILLING] No invoice_id in customer response")
+            return {"success": False, "error": "No invoice_id"}
+        
+        invoice_service = InvoiceService(db)
+        invoice = invoice_service.get_invoice_by_id(invoice_id)
+        
+        if not invoice:
+            print(f"[BILLING] Invoice {invoice_id} not found for customer response")
+            return {"success": False, "error": "Invoice not found"}
+        
+        # Crear mensaje para customer_status
+        if error_message:
+            # Error en la verificación/creación del cliente
+            status_message = f"Customer verification failed: {error_message}"
+            await invoice_service.update_customer_status(invoice_id, status_message)
+            
+            # Actualizar estado general de la factura
+            await invoice_service.update_invoice_status(
+                invoice_id,
+                InvoiceStatus.FAILED,
+                notes=f"Invoice failed due to customer verification issues"
             )
-            
-            # ENVIAR EVENTO ASÍNCRONO AL PAYMENT SERVICE
-            await request_payment_processing(
-                invoice_id=invoice_id,
-                amount=unit_price * quantity_requested,
-                customer_id=getattr(invoice, 'customer_id', invoice.customer_email),
-                product_id=product_id
-            )
-            
-            print(f"[BILLING] Payment request sent for invoice {invoice.invoice_number}")
-            
+            print(f"[BILLING] Customer error for invoice {invoice.invoice_number}: {error_message}")
+        elif customer_exists:
+            # Cliente existe
+            status_message = "Customer exists and verified"
+            await invoice_service.update_customer_status(invoice_id, status_message)
+            print(f"[BILLING] Customer exists for invoice {invoice.invoice_number}")
+        elif customer_created:
+            # Cliente fue creado exitosamente
+            status_message = "Customer created successfully"
+            await invoice_service.update_customer_status(invoice_id, status_message)
+            print(f"[BILLING] Customer created for invoice {invoice.invoice_number}")
         else:
-            # No hay inventario, marcar como fallida
-            invoice = invoice_service.update_invoice_status(
-                invoice_id=invoice_id,
-                status=InvoiceStatus.FAILED,
-                notes=f"Insufficient inventory: {message}"
-            )
-            print(f"[BILLING] Invoice {invoice.invoice_number} failed: no inventory")
+            # Caso no manejado - actualizar estado
+            status_message = "Customer verification result unclear"
+            await invoice_service.update_customer_status(invoice_id, status_message)
+            print(f"[BILLING] Unclear customer verification result for {invoice.invoice_number}")
+        
+        return {"success": True}
             
     except Exception as e:
-        print(f"[BILLING] Error processing inventory response: {e}")
-    
-    return {"success": True}
+        import traceback
+        print(f"[BILLING] Error handling customer response: {e}")
+        print(traceback.format_exc())
+        return {"success": False, "error": str(e)}
+
+
+
+
+
+@app.post("/customer-deletion-request")
+async def handle_customer_deletion_request(event_data: dict, db: Session = Depends(get_db)):
+    """Validar si se puede eliminar cliente desde perspectiva de facturación"""
+    try:
+        print(f"[BILLING] Received customer deletion request: {event_data}")
+        
+        data = event_data.get("data", event_data)
+        customer_id = data.get("customer_id")
+        
+        if not customer_id:
+            print(f"[BILLING] No customer_id in deletion request")
+            return {"success": False, "error": "No customer_id"}
+        
+        print(f"[BILLING] Validating customer deletion for {customer_id}")
+        
+        # Verificar si el cliente tiene facturas activas que impidan eliminación
+        invoice_service = InvoiceService(db)
+        
+        # Contar facturas en estados que bloquean eliminación
+        active_invoices = invoice_service.get_invoices_by_customer(customer_id)
+        blocking_invoices = [
+            inv for inv in active_invoices 
+            if inv.status in [InvoiceStatus.PENDING.value, InvoiceStatus.PROCESSING.value]
+        ]
+        
+        can_delete = len(blocking_invoices) == 0
+        blocking_reason = None
+        
+        if not can_delete:
+            blocking_reason = f"Customer has {len(blocking_invoices)} active invoices in processing/pending status"
+            print(f"[BILLING] Customer deletion BLOCKED: {blocking_reason}")
+        else:
+            print(f"[BILLING] Customer deletion APPROVED: No blocking invoices found")
+        
+        # Responder al Account Service
+        response_data = {
+            "customer_id": customer_id,
+            "service_name": "billing-service",
+            "can_delete": can_delete,
+            "blocking_reason": blocking_reason,
+            "active_invoices_count": len(active_invoices),
+            "blocking_invoices_count": len(blocking_invoices),
+            "validated_at": datetime.utcnow().isoformat()
+        }
+        
+        # Enviar respuesta via Dapr PubSub
+        await send_deletion_response(response_data)
+        
+        return {"success": True}
+        
+    except Exception as e:
+        print(f"[BILLING] Error validating customer deletion: {e}")
+        import traceback
+        print(f"[BILLING] Full traceback: {traceback.format_exc()}")
+        return {"success": False, "error": str(e)}
+
+async def send_deletion_response(response_data: dict):
+    """Enviar respuesta de validación de eliminación al Account Service"""
+    try:
+        dapr_url = f"http://localhost:{settings.dapr_http_port}"
+        pubsub_url = f"{dapr_url}/v1.0/publish/rabbitmq-pubsub/customer.deletion.response"
+        
+        headers = {
+            "Content-Type": "application/json",
+            "dapr-api-token": settings.dapr_api_token
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(pubsub_url, json=response_data, headers=headers)
+            
+        if response.status_code == 204:
+            print(f"[BILLING] Deletion validation response sent successfully")
+        else:
+            print(f"[BILLING] Failed to send deletion response: {response.status_code}")
+            
+    except Exception as e:
+        print(f"[BILLING] Error sending deletion response: {e}")
+
+
+
+
+@app.post("/inventory-response")
+async def handle_inventory_response(event_data: dict, db: Session = Depends(get_db)):
+    """Manejar respuesta de verificación de inventario"""
+    try:
+        print(f"[BILLING] Received inventory response: {event_data}")
+        
+        data = event_data.get("data", event_data)
+        invoice_id = data.get("invoice_id")
+        available = data.get("available", False)
+        unit_price = data.get("unit_price")
+        message = data.get("message", "")
+        
+        if not invoice_id:
+            print(f"[BILLING] No invoice_id in inventory response")
+            return {"success": False}
+        
+        invoice_service = InvoiceService(db)
+        invoice = invoice_service.get_invoice_by_id(invoice_id)
+        
+        if not invoice:
+            print(f"[BILLING] Invoice {invoice_id} not found")
+            return {"success": False}
+        
+        # Actualizar estado del inventario en campo dedicado
+        inventory_status = f"Inventory {'' if available else 'not '}available: {message}"
+        await invoice_service.update_inventory_status(invoice_id, inventory_status)
+        
+        if available and unit_price:
+            
+            # AÑADIR ESTO: Actualizar estado del pago ANTES de solicitarlo
+            await invoice_service.update_payment_status(invoice_id, "Payment processing initiated")
+            
+            # Proceder con el pago
+            await request_payment_processing(
+                invoice_id, 
+                unit_price * invoice.quantity,
+                invoice.customer_id,
+                invoice.product_id
+            )
+        else:
+            # Inventario no disponible - marcar como fallida
+            await invoice_service.update_invoice_status(
+                invoice_id,
+                InvoiceStatus.FAILED,
+                notes=f"Invoice failed due to inventory issues"
+            )
+            print(f"[BILLING] Invoice {invoice.invoice_number} failed due to inventory")
+        
+        return {"success": True}
+        
+    except Exception as e:
+        print(f"[BILLING] Error handling inventory response: {e}")
+        
+        # AÑADIR MANEJO ROBUSTO DE ERRORES
+        try:
+            # Obtener ID de factura del evento si es posible
+            invoice_id = event_data.get("data", event_data).get("invoice_id")
+            if invoice_id:
+                invoice_service = InvoiceService(db)
+                invoice = invoice_service.get_invoice_by_id(invoice_id)
+                
+                if invoice:
+                    # Marcar factura como fallida
+                    await invoice_service.update_invoice_status(
+                        invoice_id,
+                        InvoiceStatus.FAILED,
+                        notes=f"System error processing inventory response: {str(e)}"
+                    )
+                    
+                    # Actualizar estados específicos
+                    await invoice_service.update_payment_status(invoice_id, "Payment not processed due to system error")
+                    
+                    print(f"[BILLING] Invoice {invoice.invoice_number} marked as FAILED due to error")
+                    
+                    # Si el error ocurrió después de verificar inventario, compensar
+                    product_id = invoice.product_id
+                    if product_id:
+                        await trigger_inventory_compensation(
+                            invoice_id=invoice_id,
+                            product_id=product_id,
+                            quantity=invoice.quantity,
+                            reason=f"System error: {str(e)}"
+                        )
+        except Exception as recovery_error:
+            print(f"[BILLING] CRITICAL ERROR: Failed to handle exception recovery: {recovery_error}")
+        
+        return {"success": False, "error": str(e)}
+
+
 
 
 # FUNCION PARA ENVIAR EVENTO DE PROCESAMIENTO DE PAGO
 async def request_payment_processing(invoice_id: int, amount: float, customer_id: str, product_id: str):
-    """Enviar evento para solicitar procesamiento de pago"""
+    """Enviar evento para solicitar procesamiento de pago con timeout"""
     print(f"[BILLING] Requesting payment for invoice {invoice_id}, amount: ${amount}")
+    
+    # Actualizar estado de pago ANTES de enviar la solicitud
+    db = next(get_db())
+    invoice_service = InvoiceService(db)
+    await invoice_service.update_payment_status(invoice_id, "Payment processing initiated")
     
     payment_request_data = {
         "invoiceId": str(invoice_id),
@@ -127,9 +331,13 @@ async def request_payment_processing(invoice_id: int, amount: float, customer_id
         "requestedBy": "billing-service"
     }
     
+    # Iniciar tarea de timeout en segundo plano
+    # No espera a que termine para continuar con el flujo
+    asyncio.create_task(check_payment_timeout(invoice_id, 60))  # 60 segundos timeout
+    
     try:
-        # Enviar evento de solicitud de pago con timeout
-        dapr_url = f"http://localhost:3501"
+        # Enviar evento de solicitud de pago
+        dapr_url = f"http://localhost:{settings.dapr_http_port}"
         pubsub_url = f"{dapr_url}/v1.0/publish/rabbitmq-pubsub/payment-request"
 
         headers = {
@@ -154,6 +362,54 @@ async def request_payment_processing(invoice_id: int, amount: float, customer_id
 
 
 
+async def check_payment_timeout(invoice_id: int, timeout_seconds: int = 60):
+    """Verificar si un pago ha expirado después del tiempo especificado"""
+    print(f"[BILLING] Setting payment timeout for invoice {invoice_id}: {timeout_seconds} seconds")
+    
+    try:
+        # Esperar el tiempo de timeout
+        await asyncio.sleep(timeout_seconds)
+        
+        # Verificar si la factura sigue en estado PROCESSING
+        db = next(get_db())
+        invoice_service = InvoiceService(db)
+        invoice = invoice_service.get_invoice_by_id(invoice_id)
+        
+        if invoice and invoice.status == InvoiceStatus.PROCESSING.value:
+            print(f"[BILLING] Payment TIMEOUT for invoice {invoice.invoice_number} after {timeout_seconds} seconds")
+            
+            # Cancelar factura por timeout
+            await invoice_service.update_invoice_status(
+                invoice_id,
+                InvoiceStatus.CANCELLED,
+                notes=f"Payment processing timed out after {timeout_seconds} seconds"
+            )
+            
+            # Actualizar estado del pago
+            await invoice_service.update_payment_status(
+                invoice_id, 
+                f"Payment failed: Timeout after waiting {timeout_seconds} seconds without response"
+            )
+            
+            # Compensar inventario
+            await trigger_inventory_compensation(
+                invoice_id=invoice_id,
+                product_id=invoice.product_id,
+                quantity=invoice.quantity,
+                reason="Payment processing timeout"
+            )
+            
+            # Enviar notificación
+            await send_invoice_notification(invoice, "cancelled")
+            print(f"[BILLING] Invoice {invoice.invoice_number} cancelled due to payment timeout")
+        else:
+            print(f"[BILLING] No timeout needed for invoice {invoice_id} - already processed")
+    
+    except Exception as e:
+        print(f"[BILLING] Error in payment timeout check: {e}")
+
+
+
 async def handle_payment_request_failure(invoice_id: int, product_id: str, reason: str):
     """Manejar falla en la solicitud de pago - activar compensación"""
     print(f"[BILLING] 🔄 Payment request failed for invoice {invoice_id}: {reason}")
@@ -171,7 +427,7 @@ async def handle_payment_request_failure(invoice_id: int, product_id: str, reaso
         db = next(get_db())  # Obtener sesión de DB
         invoice_service = InvoiceService(db)
         
-        invoice = invoice_service.update_invoice_status(
+        invoice = await invoice_service.update_invoice_status(
             invoice_id=invoice_id,
             status=InvoiceStatus.CANCELLED,
             notes=f"Payment request failed: {reason}. Inventory compensation triggered."
@@ -183,7 +439,7 @@ async def handle_payment_request_failure(invoice_id: int, product_id: str, reaso
         print(f"[BILLING] Error handling payment request failure: {e}")
 
 
-# NUEVOS ENDPOINTS para recibir respuestas de payment
+
 @app.post("/payment-completed")
 async def handle_payment_completed(event_data: dict, db: Session = Depends(get_db)):
     """Manejar pago completado exitosamente"""
@@ -196,9 +452,41 @@ async def handle_payment_completed(event_data: dict, db: Session = Depends(get_d
     
     try:
         invoice_service = InvoiceService(db)
+        invoice = invoice_service.get_invoice_by_id(invoice_id)
         
-        # Actualizar factura como completada
-        invoice = invoice_service.update_invoice_status(
+        if not invoice:
+            print(f"[BILLING] Invoice {invoice_id} not found for payment completion")
+            return {"success": False, "error": "Invoice not found"}
+        
+        # VERIFICAR ESTADO ACTUAL - Solo permitir cambio si está en PROCESSING
+        if invoice.status == InvoiceStatus.CANCELLED.value:
+            print(f"[BILLING] IGNORED payment completion for cancelled invoice {invoice.invoice_number}")
+            await invoice_service.update_payment_status(
+                invoice_id, 
+                f"Payment received after cancellation (timeout). Transaction ID: {transaction_id}. No state change."
+            )
+            return {"success": True, "message": "Invoice already cancelled, payment ignored"}
+        
+        elif invoice.status == InvoiceStatus.COMPLETED.value:
+            print(f"[BILLING] IGNORED duplicate payment completion for invoice {invoice.invoice_number}")
+            return {"success": True, "message": "Invoice already completed"}
+        
+        elif invoice.status == InvoiceStatus.FAILED.value:
+            print(f"[BILLING] IGNORED payment completion for failed invoice {invoice.invoice_number}")
+            await invoice_service.update_payment_status(
+                invoice_id, 
+                f"Late payment received for failed invoice. Transaction ID: {transaction_id}. No state change."
+            )
+            return {"success": True, "message": "Invoice already failed, payment ignored"}
+
+        # Actualizar estado de pago
+        await invoice_service.update_payment_status(
+            invoice_id, 
+            f"Payment completed successfully. Transaction ID: {transaction_id}, Amount: ${amount}"
+        )
+        
+        # Actualizar factura como completada SOLO si está en PROCESSING
+        invoice = await invoice_service.update_invoice_status(
             invoice_id=invoice_id,
             status=InvoiceStatus.COMPLETED,
             notes=f"Payment completed successfully. Transaction ID: {transaction_id}, Amount: ${amount}"
@@ -238,7 +526,7 @@ async def handle_payment_failed(event_data: dict, db: Session = Depends(get_db))
             )
             
             # Marcar factura como fallida
-            invoice_service.update_invoice_status(
+            await invoice_service.update_invoice_status(
                 invoice_id=invoice_id,
                 status=InvoiceStatus.FAILED,
                 notes=f"Payment failed: {reason}. Details: {error_details}. Inventory compensated."
@@ -308,8 +596,8 @@ async def handle_inventory_compensated(event_data: dict, db: Session = Depends(g
             if invoice:
                 current_notes = invoice.notes or ""
                 compensation_note = f"\n[COMPENSATED] Restored {quantity_restored} units to inventory"
-                
-                invoice_service.update_invoice_status(
+
+                await invoice_service.update_invoice_status(
                     invoice_id=invoice_id,
                     status=InvoiceStatus.CANCELLED,  # Estado final después de compensación
                     notes=current_notes + compensation_note
@@ -340,7 +628,7 @@ async def handle_billing_compensate(event_data: dict, db: Session = Depends(get_
         invoice_service = InvoiceService(db)
         
         # Marcar factura como cancelada/compensada
-        invoice = invoice_service.update_invoice_status(
+        invoice = await invoice_service.update_invoice_status(
             invoice_id=invoice_id,
             status=InvoiceStatus.CANCELLED,
             notes=f"Compensated by external service: {reason}"

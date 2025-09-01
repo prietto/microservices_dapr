@@ -36,3 +36,9 @@ class InventoryStatusResponse(BaseModel):
     quantity: int
     status: str  # "available", "low_stock", "out_of_stock"
     last_updated: datetime
+
+
+class StockUpdateRequest(BaseModel):
+    quantity: int
+    operation: str  # "add" o "set" o "subtract"
+    reason: Optional[str] = None

@@ -7,7 +7,7 @@ Este repositorio implementa una arquitectura de microservicios usando Dapr para 
 - **account_service/**: Gestiona cuentas de clientes. Archivos clave: `app/main.py`, `app/service/customer_service.py`.
 - **billing_service/**: Maneja facturación y facturas. Archivos clave: `app/main.py`, `app/services/invoice_service.py`.
 - **inventory_service/**: Gestiona artículos de inventario y categorías. Archivos clave: `app/main.py`, `app/services/inventory_service.py`.
-- **api_gateway/**: Gateway Python FastAPI para enrutamiento, autenticación y agregación. Archivos clave: `app/main.py`, `app/services/dapr_client.py`.
+- **api_gateway/**: Gateway Python FastAPI para enrutamiento, autenticación y agregación. Archivos clave: `app/main.py`
 - **payment_service/**: API de pagos basada en .NET. Archivo clave: `PaymentService.Api/Program.cs`.
 
 ## Comunicación e Integración

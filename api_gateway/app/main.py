@@ -5,6 +5,14 @@ import jwt
 import requests
 from datetime import datetime, timedelta
 from typing import Dict, List
+from pydantic import BaseModel
+from typing import Optional
+
+# Agregar modelo para actualización de stock
+class StockUpdateRequest(BaseModel):
+    quantity: int
+    operation: str  # "add" o "set" o "subtract"
+    reason: Optional[str] = None
 
 app = FastAPI(title="Microservices API Gateway with JWT", version="1.0.0")
 
@@ -64,8 +72,7 @@ def verify_jwt_token(credentials: HTTPAuthorizationCredentials = Depends(securit
     except jwt.JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# Endpoints
-from pydantic import BaseModel
+
 
 class LoginRequest(BaseModel):
     email: str
@@ -93,7 +100,59 @@ def get_current_user(payload: dict = Depends(verify_jwt_token)):
     }
 
 
-from typing import Optional
+
+
+
+@app.patch("/api/inventory/{item_id}/stock")
+def update_item_stock(
+    item_id: str,
+    stock_data: StockUpdateRequest,
+    payload: dict = Depends(verify_jwt_token)
+):
+    """Actualizar stock de un item específico"""
+    # Verificar permisos - solo admin puede modificar stock
+    if "admin" not in payload.get("roles", []):
+        raise HTTPException(status_code=403, detail="Insufficient permissions - admin role required")
+    
+    try:
+        # Preparar datos para enviar al inventory service
+        update_data = {
+            "quantity": stock_data.quantity,
+            "operation": stock_data.operation,
+            "reason": stock_data.reason or f"Stock updated by {payload['email']}",
+            "updated_by": payload["email"]
+        }
+        
+        url = f"http://localhost:3501/v1.0/invoke/inventory-service/method/api/v1/items/{item_id}/stock"
+        
+        response = requests.patch(
+            url,
+            json=update_data,
+            headers={
+                "dapr-api-token": DAPR_API_TOKEN,
+                "Content-Type": "application/json"
+            },
+            timeout=10
+        )
+        
+        if response.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"Item '{item_id}' not found")
+        elif response.status_code == 400:
+            try:
+                detail = response.json().get("detail", "Bad request")
+            except Exception:
+                detail = response.text or "Invalid stock operation"
+            raise HTTPException(status_code=400, detail=detail)
+        elif response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail="Service error")
+            
+        return response.json()
+        
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+
 
 @app.get("/api/inventory")
 def get_inventory(
@@ -138,6 +197,7 @@ def create_invoice(invoice_data: dict, payload: dict = Depends(verify_jwt_token)
     
     invoice_data["created_by"] = payload["email"]
     
+
     try:
         response = requests.post(
             "http://localhost:3501/v1.0/invoke/billing-service/method/api/v1/create-invoice",
@@ -151,6 +211,167 @@ def create_invoice(invoice_data: dict, payload: dict = Depends(verify_jwt_token)
         return response.json()
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
+
+
+
+
+@app.get("/api/customers")
+def get_customers(payload: dict = Depends(verify_jwt_token)):
+    if "admin" not in payload.get("roles", []) and "billing" not in payload.get("roles", []):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    try:
+        url = "http://localhost:3501/v1.0/invoke/accounts-service/method/api/v1/customers"
+        response = requests.get(
+            url,
+            headers={"dapr-api-token": DAPR_API_TOKEN},
+            timeout=10
+        )
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail="Service error")
+        return response.json()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
+
+@app.get("/api/customers/{customer_id}")
+def get_customer(customer_id: str, payload: dict = Depends(verify_jwt_token)):
+    if "admin" not in payload.get("roles", []) and "billing" not in payload.get("roles", []):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    try:
+        url = f"http://localhost:3501/v1.0/invoke/accounts-service/method/api/v1/customers/{customer_id}"
+        response = requests.get(
+            url,
+            headers={"dapr-api-token": DAPR_API_TOKEN},
+            timeout=10
+        )
+        if response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        elif response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail="Service error")
+        return response.json()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
+
+@app.post("/api/customers")
+def create_customer(customer_data: dict, payload: dict = Depends(verify_jwt_token)):
+    if "admin" not in payload.get("roles", []):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    url = "http://localhost:3501/v1.0/invoke/accounts-service/method/api/v1/customers"
+    try:
+        response = requests.post(
+            url,
+            json=customer_data,
+            headers={
+                "dapr-api-token": DAPR_API_TOKEN,
+                "Content-Type": "application/json"
+            },
+            timeout=10
+        )
+        
+        if response.status_code == 400:
+            try:
+                detail = response.json().get("detail", "Bad request")
+            except Exception:
+                detail = response.text or "Bad request"
+            raise HTTPException(status_code=400, detail=detail)
+        elif response.status_code != 200 and response.status_code != 201:
+            raise HTTPException(status_code=response.status_code, detail="Service error")
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
+    
+    
+@app.delete("/api/customers/{customer_id}/request-deletion")
+def request_customer_deletion(customer_id: str, payload: dict = Depends(verify_jwt_token)):
+    if "admin" not in payload.get("roles", []):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    try:
+        url = f"http://localhost:3501/v1.0/invoke/accounts-service/method/api/v1/customers/{customer_id}/request-deletion"
+        response = requests.delete(
+            url,
+            headers={"dapr-api-token": DAPR_API_TOKEN},
+            timeout=10
+        )
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail="Service error")
+        return response.json()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
+
+@app.get("/api/customers/{customer_id}/deletion-status")
+def get_deletion_status(customer_id: str, payload: dict = Depends(verify_jwt_token)):
+    if "admin" not in payload.get("roles", []):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    try:
+        url = f"http://localhost:3501/v1.0/invoke/accounts-service/method/api/v1/customers/{customer_id}/deletion-status"
+        response = requests.get(
+            url,
+            headers={"dapr-api-token": DAPR_API_TOKEN},
+            timeout=10
+        )
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail="Service error")
+        return response.json()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
+
+
+
+@app.delete("/api/customers/{customer_id}")
+def delete_customer(customer_id: str, payload: dict = Depends(verify_jwt_token)):
+    """Eliminar cliente con validación distribuida"""
+    if "admin" not in payload.get("roles", []):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    
+    try:
+        url = f"http://localhost:3501/v1.0/invoke/accounts-service/method/api/v1/customers/{customer_id}"
+        response = requests.delete(
+            url,
+            headers={"dapr-api-token": DAPR_API_TOKEN},
+            timeout=30  # Timeout más largo para proceso distribuido
+        )
+
+        print('response=> ',response)
+        
+        if response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        elif response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail="Service error")
+            
+        return response.json()
+        
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
+
+
+
+
+@app.post("/api/customers/{customer_id}/reset-deletion")
+def reset_customer_deletion_status(customer_id: str, payload: dict = Depends(verify_jwt_token)):
+    """🔧 TEMPORAL: Resetear estado de eliminación para testing"""
+    if "admin" not in payload.get("roles", []):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    
+    try:
+        url = f"http://localhost:3501/v1.0/invoke/accounts-service/method/api/v1/customers/{customer_id}/reset-deletion"
+        response = requests.post(
+            url,
+            headers={"dapr-api-token": DAPR_API_TOKEN},
+            timeout=10
+        )
+        
+        if response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        elif response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail="Service error")
+            
+        return response.json()
+        
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
+
+
 
 @app.get("/health")
 def health():

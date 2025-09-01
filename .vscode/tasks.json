@@ -1,0 +1,90 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Check Docker",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoExit",
+        "-Command",
+        "$docker = Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue; " ,
+        "if (-not $docker) {",
+        "    Write-Host 'Docker Desktop no está corriendo. Iniciando Docker...';",
+        "    Start-Process 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe';",
+        "    Start-Sleep -Seconds 10;",
+        "}",
+        "Write-Host 'Esperando a que Docker esté disponible...';",
+        "while (!(docker info 2>$null)) { Start-Sleep -Seconds 3; }",
+        "Write-Host 'Docker está listo ✅';"
+      ]
+    },
+    {
+      "label": "Account Service",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoExit",
+        "-Command",
+        "cd account_service; ..\\venv\\Scripts\\Activate.ps1; ./run-accounts-with-dapr.ps1"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Billing Service",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoExit",
+        "-Command",
+        "cd billing_service; ..\\venv\\Scripts\\Activate.ps1; ./run-billing-with-dapr.ps1"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Inventory Service",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoExit",
+        "-Command",
+        "cd inventory_service; ..\\venv\\Scripts\\Activate.ps1; ./run-inventory-with-dapr.ps1"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Payment Service",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoExit",
+        "-Command",
+        "cd payment_service; ..\\venv\\Scripts\\Activate.ps1; ./run-payment-with-dapr.ps1"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "API Gateway",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoExit",
+        "-Command",
+        "cd api_gateway; ..\\venv\\Scripts\\Activate.ps1; ./run-gateway-with-dapr.ps1"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Start All Services",
+      "dependsOn": [
+        "Check Docker",
+        "Account Service",
+        "Billing Service",
+        "Inventory Service",
+        "Payment Service",
+        "API Gateway"
+      ],
+      "dependsOrder": "parallel"
+    }
+  ]
+}

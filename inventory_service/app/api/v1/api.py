@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.db import get_db
 from app.services.inventory_service import InventoryService
-from app.schemas.inventory_item import InventoryItemCreate
+from app.schemas.inventory_item import InventoryItemCreate, StockUpdateRequest
 from app.models.inventory_item import InventoryItem
 import httpx
 import asyncio
@@ -214,33 +214,66 @@ async def service_health():
 
 
 @api_router.patch("/items/{product_id}/stock")
-def update_stock(product_id: str, quantity: int, db: Session = Depends(get_db)):
-    """Actualizar solo la cantidad de stock de un producto"""
+def update_item_stock(
+    product_id: str,
+    stock_data: StockUpdateRequest,
+    db: Session = Depends(get_db)
+):
+    """Actualizar stock de un item siguiendo convenciones del proyecto"""
     try:
         inventory_service = InventoryService(db)
         
+        # Verificar que el item existe
         existing = inventory_service.get_item_by_product_id(product_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Product not found")
         
-        # Solo actualizar la cantidad
-        existing.quantity = quantity
+        # Validar operación
+        valid_operations = ["add", "set", "subtract"]
+        if stock_data.operation not in valid_operations:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid operation. Must be one of: {valid_operations}"
+            )
+        
+        # Validar cantidad
+        if stock_data.quantity < 0:
+            raise HTTPException(status_code=400, detail="Quantity cannot be negative")
+        
+        # Calcular nuevo stock
+        old_stock = existing.quantity
+        
+        if stock_data.operation == "add":
+            new_stock = old_stock + stock_data.quantity
+        elif stock_data.operation == "subtract":
+            new_stock = old_stock - stock_data.quantity
+            if new_stock < 0:
+                raise HTTPException(status_code=400, detail="Cannot subtract more than available stock")
+        elif stock_data.operation == "set":
+            new_stock = stock_data.quantity
+        
+        # Actualizar stock
+        existing.quantity = new_stock
         db.commit()
         db.refresh(existing)
         
+        print(f"[INVENTORY] Stock updated for {product_id}: {old_stock} -> {new_stock} ({stock_data.operation})")
+        
         return {
             "message": "Stock updated successfully",
-            "product_id": existing.product_id,
-            "name": existing.name,
-            "old_quantity": existing.quantity,
-            "new_quantity": quantity,
-            "price": existing.price
+            "product_id": product_id,
+            "old_stock": old_stock,
+            "new_stock": new_stock,
+            "operation": stock_data.operation,
+            "quantity_changed": stock_data.quantity,
+            "reason": stock_data.reason
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[INVENTORY] Error updating stock: {e}")
+        raise HTTPException(status_code=500, detail=f"Error updating stock: {str(e)}")
     
 
 @api_router.post("/compensate-inventory")

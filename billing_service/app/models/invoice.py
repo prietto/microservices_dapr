@@ -23,6 +23,11 @@ class Invoice(Base):
     total_amount = Column(Float, nullable=True)
     status = Column(String(20), default=InvoiceStatus.PENDING.value)
     customer_email = Column(String(100), nullable=True)
+    customer_id = Column(String(50), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     notes = Column(Text, nullable=True)
+
+    customer_status = Column(Text, nullable=True)  # Nuevo campo para estado del cliente
+    inventory_status = Column(Text, nullable=True)  # Nuevo campo para estado del inventario
+    payment_status = Column(Text, nullable=True)  # Nuevo campo para estado del pago    

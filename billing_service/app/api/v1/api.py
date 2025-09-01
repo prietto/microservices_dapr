@@ -13,29 +13,35 @@ router = APIRouter()
 def test():
     return {"message": "Billing API working!"}
 
+
+
 @router.post("/create-invoice", response_model=InvoiceResponse)
 async def create_invoice(invoice_data: InvoiceCreate, db: Session = Depends(get_db)):
-    """Crear nueva factura y solicitar verificación de inventario"""
-    
+    """Crear nueva factura y solicitar verificación de inventario y cliente"""
+    print('invoice_data=> ', invoice_data)
     try:
         # 1. Crear factura en estado pendiente
         invoice_service = InvoiceService(db)
-        invoice = invoice_service.create_invoice(invoice_data)
+        invoice = await invoice_service.create_invoice(invoice_data)
         
         print(f"[BILLING] Created invoice {invoice.invoice_number} in PENDING state")
         
         # 2. Marcar como processing
-        invoice_service.update_invoice_status(
+        await invoice_service.update_invoice_status(
             invoice.id, 
             InvoiceStatus.PROCESSING,
-            notes="Requesting inventory verification"
+            notes="Invoice created - Customer and inventory verification in progress"
         )
         
-        # 3. Solicitar verificación de inventario
         dapr_url = f"http://localhost:{settings.dapr_http_port}"
-        pubsub_url = f"{dapr_url}/v1.0/publish/rabbitmq-pubsub/inventory-check"
+        headers = {
+            "Content-Type": "application/json",
+            "dapr-api-token": settings.dapr_api_token
+        }
         
-        event_data = {
+        # 3. Solicitar verificación de inventario
+        inventory_pubsub_url = f"{dapr_url}/v1.0/publish/rabbitmq-pubsub/inventory-check"
+        inventory_event_data = {
             "invoice_id": invoice.id,
             "product_id": invoice.product_id,
             "quantity": invoice.quantity,
@@ -43,31 +49,53 @@ async def create_invoice(invoice_data: InvoiceCreate, db: Session = Depends(get_
         }
         
         print(f"[BILLING] Sending inventory check for invoice {invoice.invoice_number}")
-        headers = {
-            "Content-Type": "application/json",
-            "dapr-api-token": settings.dapr_api_token
+
+        # 4. Solicitar verificación de cliente
+        customer_pubsub_url = f"{dapr_url}/v1.0/publish/rabbitmq-pubsub/customer-check"
+        customer_event_data = {
+            "invoice_id": invoice.id,
+            "customer_id": invoice.customer_id,
+            "customer_email": invoice.customer_email,
+            "action": "check_for_billing"
         }
+        
+        print(f"[BILLING] Sending customer check for invoice {invoice.invoice_number}")
 
         async with httpx.AsyncClient() as client:
-            response = await client.post(pubsub_url, json=event_data, headers=headers)
+            # Enviar solicitud de verificación de inventario
+            inventory_response = await client.post(inventory_pubsub_url, json=inventory_event_data, headers=headers)
+            
+            # Enviar solicitud de verificación de cliente
+            customer_response = await client.post(customer_pubsub_url, json=customer_event_data, headers=headers)
 
-        if response.status_code == 204:
-            print(f"[BILLING] Inventory check requested for invoice {invoice.invoice_number}")
+        # Verificar si ambas solicitudes fueron exitosas
+        if inventory_response.status_code == 204 and customer_response.status_code == 204:
+            print(f"[BILLING] Inventory and customer checks requested for invoice {invoice.invoice_number}")
             # Refrescar invoice para obtener el estado actualizado
             invoice = invoice_service.get_invoice_by_id(invoice.id)
             return invoice
         else:
-            # Si falla el evento, marcar factura como fallida
+            # Si falla algún evento, marcar factura como fallida
+            error_msg = ""
+            if inventory_response.status_code != 204:
+                error_msg += f"Inventory check failed (status: {inventory_response.status_code}); "
+            if customer_response.status_code != 204:
+                error_msg += f"Customer check failed (status: {customer_response.status_code}); "
+            
             invoice_service.update_invoice_status(
                 invoice.id,
                 InvoiceStatus.FAILED,
-                notes="Failed to request inventory verification"
+                notes=f"Failed to request verifications: {error_msg}"
             )
-            raise HTTPException(status_code=500, detail="Failed to request inventory verification")
+            raise HTTPException(status_code=500, detail=f"Failed to request verifications: {error_msg}")
             
     except Exception as e:
+        import traceback
+        print(traceback.format_exc())
         print(f"[BILLING] Error creating invoice: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
 
 @router.get("/invoices/{invoice_id}", response_model=InvoiceResponse)
 def get_invoice(invoice_id: int, db: Session = Depends(get_db)):
@@ -96,6 +124,9 @@ def list_invoices(status: str = None, db: Session = Depends(get_db)):
     
     return {"invoices": invoices}
 
+
+
+
 @router.get("/queue-status")
 async def check_queue_status():
     """Verificar el estado de las colas de RabbitMQ desde billing service"""
@@ -122,8 +153,11 @@ async def check_queue_status():
                     if any(pattern in queue_name for pattern in [
                         "billing-service-", 
                         "inventory-service-",
+                        "account-service-",
                         "inventory-check",
-                        "inventory-response"
+                        "inventory-response",
+                        "customer-check",
+                        "customer-response"
                     ]):
                         queue_info = {
                             "name": queue_name,
@@ -147,6 +181,9 @@ async def check_queue_status():
                 
     except Exception as e:
         return {"status": "error", "message": f"Error: {str(e)}"}
+
+
+
 
 @router.get("/rabbitmq-debug")
 async def rabbitmq_debug():
