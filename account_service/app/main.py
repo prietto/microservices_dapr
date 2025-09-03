@@ -11,6 +11,8 @@ from app.db.database import create_tables, get_db
 from app.core.config import settings
 from app.services.customer_service import CustomerService
 from app.services.deletion_service import CustomerDeletionService
+import time
+import random
 
 
 # Crear tablas siguiendo convenciones del proyecto
@@ -51,6 +53,21 @@ def subscribe():
     ]
     return subscriptions
 
+
+
+def simulate_processing_time(min_delay: float = 0.1, max_delay: float = 0.5):
+    """Decorator para simular tiempo de procesamiento"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            # Simular tiempo de procesamiento
+            delay = random.uniform(min_delay, max_delay)
+            print(f"[{func.__name__}] Simulating processing time: {delay:.3f}s")
+            await asyncio.sleep(delay)
+            
+            return await func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 @app.post("/customer-deletion-response")
 async def handle_deletion_response(event_data: dict, db: Session = Depends(get_db)):

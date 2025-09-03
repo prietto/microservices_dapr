@@ -7,6 +7,10 @@ from datetime import datetime, timedelta
 from typing import Dict, List
 from pydantic import BaseModel
 from typing import Optional
+import asyncio
+import random
+from fastapi import Request as FastAPIRequest
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Agregar modelo para actualización de stock
 class StockUpdateRequest(BaseModel):
@@ -26,6 +30,59 @@ app.add_middleware(
 )
 
 security = HTTPBearer()
+
+
+
+
+
+
+class ProductionLatencyMiddleware(BaseHTTPMiddleware):
+    """Middleware para simular latencia de ambiente productivo"""
+    
+    def __init__(self, app, enabled: bool = True):
+        super().__init__(app)
+        self.enabled = enabled
+        self.service_latencies = {
+            "accounts-service": {"min": 2, "max": 5},    # 2000-5000ms
+            "billing-service": {"min": 1, "max": 4},     # 1000-4000ms
+            "inventory-service": {"min": 2, "max": 5},  # 2000-5000ms
+            "payment-service": {"min": 3, "max": 6},     # 3000-6000ms
+        }
+    
+    async def dispatch(self, request: FastAPIRequest, call_next):
+        if not self.enabled:
+            return await call_next(request)
+        
+        # Determinar el servicio de destino basado en la ruta
+        service_name = self._get_target_service(request.url.path)
+        
+        if service_name and service_name in self.service_latencies:
+            # Agregar latencia simulada
+            latency_config = self.service_latencies[service_name]
+            delay = random.uniform(latency_config["min"], latency_config["max"])
+            
+            print(f"[GATEWAY] Simulating {delay:.3f}s latency for {service_name}")
+            await asyncio.sleep(delay)
+        
+        return await call_next(request)
+    
+    def _get_target_service(self, path: str) -> str:
+        """Determinar servicio de destino basado en la ruta"""
+        if "/customers" in path:
+            return "accounts-service"
+        elif "/invoices" in path:
+            return "billing-service"
+        elif "/inventory" in path:
+            return "inventory-service"
+        elif "/payments" in path:
+            return "payment-service"
+        return None
+
+# Agregar el middleware al app
+SIMULATE_PRODUCTION_LATENCY = True  # Flag para activar/desactivar
+
+app.add_middleware(ProductionLatencyMiddleware, enabled=SIMULATE_PRODUCTION_LATENCY)
+
 
 # Configuración
 JWT_SECRET = "microservices-poc-jwt-secret-2025"
@@ -220,7 +277,7 @@ def get_customers(payload: dict = Depends(verify_jwt_token)):
     if "admin" not in payload.get("roles", []) and "billing" not in payload.get("roles", []):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     try:
-        url = "http://localhost:3501/v1.0/invoke/accounts-service/method/api/v1/customers"
+        url = "http://localhost:3502/v1.0/invoke/accounts-service/method/api/v1/customers"
         response = requests.get(
             url,
             headers={"dapr-api-token": DAPR_API_TOKEN},
@@ -237,7 +294,7 @@ def get_customer(customer_id: str, payload: dict = Depends(verify_jwt_token)):
     if "admin" not in payload.get("roles", []) and "billing" not in payload.get("roles", []):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     try:
-        url = f"http://localhost:3501/v1.0/invoke/accounts-service/method/api/v1/customers/{customer_id}"
+        url = f"http://localhost:3502/v1.0/invoke/accounts-service/method/api/v1/customers/{customer_id}"
         response = requests.get(
             url,
             headers={"dapr-api-token": DAPR_API_TOKEN},
@@ -255,7 +312,7 @@ def get_customer(customer_id: str, payload: dict = Depends(verify_jwt_token)):
 def create_customer(customer_data: dict, payload: dict = Depends(verify_jwt_token)):
     if "admin" not in payload.get("roles", []):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    url = "http://localhost:3501/v1.0/invoke/accounts-service/method/api/v1/customers"
+    url = "http://localhost:3502/v1.0/invoke/accounts-service/method/api/v1/customers"
     try:
         response = requests.post(
             url,
@@ -285,7 +342,7 @@ def request_customer_deletion(customer_id: str, payload: dict = Depends(verify_j
     if "admin" not in payload.get("roles", []):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     try:
-        url = f"http://localhost:3501/v1.0/invoke/accounts-service/method/api/v1/customers/{customer_id}/request-deletion"
+        url = f"http://localhost:3502/v1.0/invoke/accounts-service/method/api/v1/customers/{customer_id}/request-deletion"
         response = requests.delete(
             url,
             headers={"dapr-api-token": DAPR_API_TOKEN},
@@ -302,7 +359,7 @@ def get_deletion_status(customer_id: str, payload: dict = Depends(verify_jwt_tok
     if "admin" not in payload.get("roles", []):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     try:
-        url = f"http://localhost:3501/v1.0/invoke/accounts-service/method/api/v1/customers/{customer_id}/deletion-status"
+        url = f"http://localhost:3502/v1.0/invoke/accounts-service/method/api/v1/customers/{customer_id}/deletion-status"
         response = requests.get(
             url,
             headers={"dapr-api-token": DAPR_API_TOKEN},
@@ -323,7 +380,7 @@ def delete_customer(customer_id: str, payload: dict = Depends(verify_jwt_token))
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     
     try:
-        url = f"http://localhost:3501/v1.0/invoke/accounts-service/method/api/v1/customers/{customer_id}"
+        url = f"http://localhost:3502/v1.0/invoke/accounts-service/method/api/v1/customers/{customer_id}"
         response = requests.delete(
             url,
             headers={"dapr-api-token": DAPR_API_TOKEN},
@@ -354,7 +411,7 @@ def reset_customer_deletion_status(customer_id: str, payload: dict = Depends(ver
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     
     try:
-        url = f"http://localhost:3501/v1.0/invoke/accounts-service/method/api/v1/customers/{customer_id}/reset-deletion"
+        url = f"http://localhost:3502/v1.0/invoke/accounts-service/method/api/v1/customers/{customer_id}/reset-deletion"
         response = requests.post(
             url,
             headers={"dapr-api-token": DAPR_API_TOKEN},

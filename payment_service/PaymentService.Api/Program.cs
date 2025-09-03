@@ -1,6 +1,7 @@
 using Dapr.Client;
 using PaymentService.Api.Models;
 using Microsoft.AspNetCore.Mvc;
+using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -20,7 +21,6 @@ if (app.Environment.IsDevelopment())
 
 app.UseCloudEvents();
 app.MapSubscribeHandler();
-
 
 app.MapPost("/payment-request", async (PaymentRequestEvent request, DaprClient daprClient, ILogger<Program> logger) =>
 {
@@ -108,37 +108,6 @@ app.MapPost("/payment-request", async (PaymentRequestEvent request, DaprClient d
 .WithTopic("rabbitmq-pubsub", "payment-request")
 .WithName("ProcessPaymentRequest");
 
-
-// NUEVA FUNCIÓN: Publicar evento de pago fallido
-static async Task PublishPaymentFailedEvent(DaprClient daprClient, ILogger logger, PaymentRequestEvent request, string reason)
-{
-    try
-    {
-        var failedEvent = new
-        {
-            invoice_id = request?.InvoiceId ?? request?.OrderId ?? "unknown",
-            order_id = request?.OrderId ?? request?.InvoiceId ?? "unknown",
-            amount = request?.Amount ?? 0,
-            customer_id = request?.CustomerId ?? "unknown",
-            product_id = request?.ProductId ?? "unknown",
-            reason = reason,
-            error_details = $"Payment validation failed: {reason}",
-            failed_at = DateTime.UtcNow,
-            transaction_id = Guid.NewGuid().ToString()
-        };
-
-        await daprClient.PublishEventAsync("rabbitmq-pubsub", "payment-failed", failedEvent);
-        logger.LogInformation("Published payment-failed event for invoice {InvoiceId} with reason: {Reason}",
-            failedEvent.invoice_id, reason);
-    }
-    catch (Exception ex)
-    {
-        logger.LogError(ex, "Failed to publish payment-failed event");
-    }
-}
-
-
-
 // Endpoint original para procesar pagos directamente
 app.MapPost("/api/payment/process", async (PaymentRequest request, DaprClient daprClient, ILogger<Program> logger) =>
 {
@@ -207,7 +176,96 @@ app.MapPost("/api/payment/subscription/order-created", async (
 .WithTopic("rabbitmq-pubsub", "order-created")
 .WithName("OrderCreatedSubscription");
 
+
+
+app.MapPost("/customer-deletion-request", async (JsonElement eventData, DaprClient daprClient, ILogger<Program> logger) =>
+{
+    try
+    {
+        logger.LogInformation("[PAYMENT] Received raw event: {EventData}", eventData.GetRawText());
+
+        // Extraer customer_id manualmente (snake_case)
+        string? customerId = null;
+        if (eventData.TryGetProperty("customer_id", out var customerIdProp))
+        {
+            customerId = customerIdProp.GetString();
+        }
+
+        logger.LogInformation("[PAYMENT] Extracted customer_id: {CustomerId}", customerId);
+
+        if (string.IsNullOrEmpty(customerId))
+        {
+            logger.LogWarning("[PAYMENT] No customer_id in deletion request");
+            return Results.BadRequest("No customer_id provided");
+        }
+
+        logger.LogInformation("[PAYMENT] Validating customer deletion for {CustomerId}", customerId);
+
+        // Por ahora, payment service siempre permite eliminación
+        bool canDelete = true;
+        string? blockingReason = null;
+
+        logger.LogInformation("[PAYMENT] Customer deletion APPROVED: No payment restrictions for {CustomerId}", customerId);
+
+        // Crear respuesta para Account Service
+        var responseData = new
+        {
+            customer_id = customerId,
+            service_name = "payment-service",
+            can_delete = canDelete,
+            blocking_reason = blockingReason,
+            validated_at = DateTime.UtcNow.ToString("O")
+        };
+
+        // Enviar respuesta via Dapr PubSub
+        await daprClient.PublishEventAsync("rabbitmq-pubsub", "customer.deletion.response", responseData);
+
+        logger.LogInformation("[PAYMENT] Deletion validation response sent successfully for {CustomerId}", customerId);
+
+        return Results.Ok();
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "[PAYMENT] Error validating customer deletion: {Error}", ex.Message);
+        return Results.Problem("Error processing customer deletion request");
+    }
+})
+.WithTopic("rabbitmq-pubsub", "customer.deletion.request")
+.WithName("CustomerDeletionRequest");
+
+
+
 app.Run();
+
+// ✅ FUNCIONES Y DECLARACIONES DE TIPOS AL FINAL DEL ARCHIVO
+
+// NUEVA FUNCIÓN: Publicar evento de pago fallido
+static async Task PublishPaymentFailedEvent(DaprClient daprClient, ILogger logger, PaymentRequestEvent request, string reason)
+{
+    try
+    {
+        var failedEvent = new
+        {
+            invoice_id = request?.InvoiceId ?? request?.OrderId ?? "unknown",
+            order_id = request?.OrderId ?? request?.InvoiceId ?? "unknown",
+            amount = request?.Amount ?? 0,
+            customer_id = request?.CustomerId ?? "unknown",
+            product_id = request?.ProductId ?? "unknown",
+            reason = reason,
+            error_details = $"Payment validation failed: {reason}",
+            failed_at = DateTime.UtcNow,
+            transaction_id = Guid.NewGuid().ToString()
+        };
+
+        await daprClient.PublishEventAsync("rabbitmq-pubsub", "payment-failed", failedEvent);
+        logger.LogInformation("Published payment-failed event for invoice {InvoiceId} with reason: {Reason}",
+            failedEvent.invoice_id, reason);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to publish payment-failed event");
+    }
+}
 
 // Función auxiliar para publicar eventos con retry
 static async Task PublishEventWithRetry(DaprClient daprClient, ILogger logger, string paymentResult, PaymentRequestEvent request, string transactionId)
@@ -277,3 +335,11 @@ static string SimulatePayment(decimal amount)
     var random = new Random();
     return random.NextDouble() > 0.3 ? "approved" : "rejected";
 }
+
+// 🆕 NUEVO: Modelo para evento de eliminación de cliente (AL FINAL)
+public record CustomerDeletionRequestEvent(
+    string CustomerId,
+    string RequestedBy,
+    DateTime Timestamp,
+    string Action
+);

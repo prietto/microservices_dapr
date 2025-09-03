@@ -8,6 +8,7 @@ from app.api.v1.api import api_router
 from app.services.inventory_service import InventoryService
 import httpx
 import asyncio
+from datetime import datetime
 
 Base.metadata.create_all(bind=engine)
 
@@ -35,8 +36,95 @@ def subscribe():
             "pubsubname": "rabbitmq-pubsub",
             "topic": "compensate-inventory",
             "route": "/compensate-inventory"
+        },
+
+        {
+            "pubsubname": "rabbitmq-pubsub",
+            "topic": "customer.deletion.request",
+            "route": "/customer-deletion-request"
         }
     ]
+
+
+
+
+@app.post("/customer-deletion-request")
+async def handle_customer_deletion_request(event_data: dict, db: Session = Depends(get_db)):
+    """Validar si se puede eliminar cliente desde perspectiva de inventario"""
+    try:
+        print(f"[INVENTORY] Received customer deletion request: {event_data}")
+        
+        data = event_data.get("data", event_data)
+        customer_id = data.get("customer_id")
+        
+        if not customer_id:
+            print(f"[INVENTORY] No customer_id in deletion request")
+            return {"success": False, "error": "No customer_id"}
+        
+        print(f"[INVENTORY] Validating customer deletion for {customer_id}")
+        
+        # En inventory service, normalmente se puede eliminar cliente
+        # a menos que tenga items reservados o personalizados
+        can_delete = True
+        blocking_reason = None
+        
+        # Ejemplo de validación (personalizar según tu lógica):
+        # item_service = ItemService(db)
+        # reserved_items = item_service.get_reserved_items_by_customer(customer_id)
+        # if reserved_items:
+        #     can_delete = False
+        #     blocking_reason = f"Customer has {len(reserved_items)} reserved items"
+        
+        if can_delete:
+            print(f"[INVENTORY] Customer deletion APPROVED: No inventory restrictions")
+        else:
+            print(f"[INVENTORY] Customer deletion BLOCKED: {blocking_reason}")
+        
+        # Responder al Account Service
+        response_data = {
+            "customer_id": customer_id,
+            "service_name": "inventory-service",
+            "can_delete": can_delete,
+            "blocking_reason": blocking_reason,
+            "validated_at": datetime.utcnow().isoformat()
+        }
+        
+        # Enviar respuesta via Dapr PubSub
+        await send_deletion_response(response_data)
+        
+        return {"success": True}
+        
+    except Exception as e:
+        print(f"[INVENTORY] Error validating customer deletion: {e}")
+        import traceback
+        print(f"[INVENTORY] Full traceback: {traceback.format_exc()}")
+        return {"success": False, "error": str(e)}
+
+
+
+
+async def send_deletion_response(response_data: dict):
+    """Enviar respuesta de validación de eliminación al Account Service"""
+    try:
+        dapr_url = f"http://localhost:{settings.dapr_http_port}"
+        pubsub_url = f"{dapr_url}/v1.0/publish/rabbitmq-pubsub/customer.deletion.response"
+        
+        headers = {
+            "Content-Type": "application/json",
+            "dapr-api-token": settings.dapr_api_token
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(pubsub_url, json=response_data, headers=headers)
+            
+        if response.status_code == 204:
+            print(f"[INVENTORY] Deletion validation response sent successfully")
+        else:
+            print(f"[INVENTORY] Failed to send deletion response: {response.status_code}")
+            
+    except Exception as e:
+        print(f"[INVENTORY] Error sending deletion response: {e}")
+
 
 # Manejar solicitudes de compensación
 @app.post("/compensate-inventory")

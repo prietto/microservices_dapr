@@ -72,7 +72,7 @@ async def request_customer_deletion(
     customer_id: str,
     deletion_service: CustomerDeletionService = Depends(get_deletion_service)
 ):
-    """🧪 LABORATORIO: Solicitar eliminación distribuida de cliente"""
+    """ LABORATORIO: Solicitar eliminación distribuida de cliente"""
     try:
         result = await deletion_service.request_customer_deletion(customer_id)
         return result
@@ -135,7 +135,7 @@ async def get_deletion_status(customer_id: str, db: Session = Depends(get_db)):
 
 @router.post("/customers/{customer_id}/reset-deletion")
 async def reset_deletion_status(customer_id: str, db: Session = Depends(get_db)):
-    """🔧 TEMPORAL: Resetear estado de eliminación para testing"""
+    """ TEMPORAL: Resetear estado de eliminación para testing"""
     try:
         customer = db.query(Customer).filter(Customer.customer_id == customer_id).first()
         
